@@ -1,0 +1,10 @@
+# Core dependencies
+# Note: The AST parser and scanner use Python 3.9+ built-in standard libraries:
+# - ast
+# - pathlib
+# - dataclasses
+# - json
+# - argparse
+
+# Testing
+pytest>=8.0.0
