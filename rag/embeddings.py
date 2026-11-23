@@ -1,28 +1,22 @@
-import os
+from fastembed import TextEmbedding
 
-import voyageai
-from dotenv import load_dotenv
+# Loads BAAI/bge-small-en-v1.5 (384 dimensions, runs locally via ONNX Runtime on CPU)
+embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
 
-load_dotenv()
 
-api_key = os.getenv("VOYAGE_API_KEY")
+def embed_query(text: str) -> list[float]:
+    """Generates an embedding vector for a single query."""
+    embeddings = list(embedding_model.embed([text]))
+    return embeddings[0].tolist()
 
-client = voyageai.Client(api_key=api_key)
 
-def embed_query(text):
-    result = client.embed(
-        texts=[text],
-        model="voyage-4",
-        input_type="query",
-    )
+def embed_documents(texts: list[str]) -> list[list[float]]:
+    """Generates embeddings for a batch of documents locally with zero API limits."""
+    embeddings = list(embedding_model.embed(texts))
+    return [e.tolist() for e in embeddings]
 
-    return result.embeddings[0]
 
-def embed_documents(texts):
-    result = client.embed(
-        texts=texts,
-        model="voyage-4",
-        input_type="document",
-    )
-
-    return result.embeddings[0]
+if __name__ == "__main__":
+    print("Testing local FastEmbed model...")
+    test_vec = embed_query("subprocess.Popen shell=False")
+    print(f"Success! Vector dimension: {len(test_vec)}")

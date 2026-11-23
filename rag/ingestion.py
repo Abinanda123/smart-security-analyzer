@@ -1,216 +1,263 @@
+import json
+import re
 from pathlib import Path
-
 from bs4 import BeautifulSoup
 
-
-# --------------------------------------------------
-# Paths
-# --------------------------------------------------
-
+# ==================================================
+# 1. Project Directory Paths
+# ==================================================
 PROJECT_ROOT = Path(__file__).parent.parent
-CWE_DIR = PROJECT_ROOT / "data" / "raw" / "cwe"
 
+CWE_DIR = PROJECT_ROOT / "data" / "raw" / "cwe"
+OWASP_DIR = PROJECT_ROOT / "data" / "raw" / "owasp"
+BANDIT_DIR = PROJECT_ROOT / "data" / "raw" / "bandit"
+
+PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
+PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+
+PROCESSED_FILE = PROCESSED_DIR / "security_knowledge.json"
+
+# ==================================================
+# 2. Metadata Mappings
+# ==================================================
 CWE_METADATA = {
-    "CWE-78": {
-        "vulnerability_type": "OS Command Injection"
-    },
-    "CWE-89": {
-        "vulnerability_type": "SQL Injection"
-    },
-    "CWE-94": {
-        "vulnerability_type": "Code Injection"
-    }
+    "CWE-78": {"vulnerability_type": "OS Command Injection"},
+    "CWE-89": {"vulnerability_type": "SQL Injection"},
+    "CWE-94": {"vulnerability_type": "Code Injection"},
 }
 
-# --------------------------------------------------
-# get CWE ID from file path
-# --------------------------------------------------
+OWASP_METADATA = {
+    "Injection_Prevention_Cheat_Sheet": {
+        "cwe_id": "CWE-78",
+        "vulnerability_type": "Injection",
+    },
+    "OS_Command_Injection_Defense_Cheat_Sheet": {
+        "cwe_id": "CWE-78",
+        "vulnerability_type": "OS Command Injection",
+    },
+    "SQL_Injection_Prevention_Cheat_Sheet": {
+        "cwe_id": "CWE-89",
+        "vulnerability_type": "SQL Injection",
+    },
+}
 
-def get_cwe_id(file_path):
-    parts = file_path.stem.split("-")
+BANDIT_METADATA = {
+    "B102": {
+        "cwe_id": "CWE-94",
+        "vulnerability_type": "Code Injection",
+        "title": "Bandit B102: Test for the use of exec",
+    },
+    "B602": {
+        "cwe_id": "CWE-78",
+        "vulnerability_type": "OS Command Injection",
+        "title": "Bandit B602: Test for use of popen with shell equals true",
+    },
+    "B605": {
+        "cwe_id": "CWE-78",
+        "vulnerability_type": "OS Command Injection",
+        "title": "Bandit B605: Test for starting a process with a shell",
+    },
+    "B608": {
+        "cwe_id": "CWE-89",
+        "vulnerability_type": "SQL Injection",
+        "title": "Bandit B608: Test for SQL injection",
+    },
+}
 
-    return f"{parts[0]}-{parts[1]}"
+# ==================================================
+# 3. Text Cleaning & Classification Helpers
+# ==================================================
+def clean_text(text: str) -> str:
+    """Removes extra whitespace and flattens multiline text."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return " ".join(lines)
+
+def classify_pattern(title: str, text: str) -> str:
+    """Classifies a section as remediation, vulnerable_pattern, or general concept."""
+    combined = f"{title} {text}".lower()
+    if any(keyword in combined for keyword in ["defense", "prevention", "remediation", "correct usage", "safe"]):
+        return "remediation"
+    if any(keyword in combined for keyword in ["incorrect usage", "vulnerable", "attack", "exploit", "issue:"]):
+        return "vulnerable_pattern"
+    return "concept"
 
 
-# --------------------------------------------------
-# Text cleaning
-# --------------------------------------------------
+IGNORE_HEADINGS = {
+    "edit custom filter",
+    "content history",
+    "submission history",
+    "modification history",
+    "previous entry names",
+    "references",
+}
 
-
-def clean_text(text):
-    lines = text.splitlines()
-
-    cleaned_lines = []
-
-    for line in lines:
-        line = line.strip()
-
-        if line:
-            cleaned_lines.append(line)
-
-    return " ".join(cleaned_lines)
-
-
-# --------------------------------------------------
-# CWE parser
-# --------------------------------------------------
-
-def parse_cwe_file(file_path):
-    # Read HTML
-    with file_path.open(
-        encoding="utf-8",
-        errors="ignore"
-    ) as file:
-        html = file.read()
-
-    # Parse HTML
-    soup = BeautifulSoup(html, "html.parser")
-
-    # Remove obvious website noise
-    for tag in soup([
-        "script",
-        "style",
-        "nav",
-        "header",
-        "footer"
-    ]):
+def extract_sections(soup: BeautifulSoup) -> list[dict]:
+    """
+    Extracts text grouped by heading tags (h2/h3) rather than arbitrary word counts.
+    Filters out navigation forms, buttons, and revision tables.
+    """
+    for tag in soup(["script", "style", "nav", "header", "footer", "form"]):
         tag.decompose()
 
-    # -----------------------------
-    # Extract title
-    # -----------------------------
+    sections = []
+    headers = soup.find_all(["h2", "h3"])
 
-    raw_title = soup.title.get_text(
-        " ",
-        strip=True
-    )
+    if not headers:
+        text = clean_text(soup.get_text(" ", strip=True))
+        if text:
+            doc_title = soup.title.get_text(strip=True) if soup.title else "Overview"
+            sections.append({"title": doc_title, "content": text})
+        return sections
 
-    title = clean_text(raw_title)
+    for header in headers:
+        raw_title = clean_text(header.get_text(strip=True))
+        # Remove anchor symbol ¶ that MkDocs places in headings
+        title = raw_title.replace("¶", "").strip()
 
-    # -----------------------------
-    # Extract full page text
-    # -----------------------------
+        # Skip UI noise and revision history sections
+        if title.lower() in IGNORE_HEADINGS:
+            continue
 
-    raw_content = soup.get_text(
-        "\n",
-        strip=True
-    )
+        body_parts = []
+        for sibling in header.find_next_siblings():
+            if sibling.name in ["h2", "h3"]:
+                break
+            text = clean_text(sibling.get_text(" ", strip=True))
+            if text:
+                body_parts.append(text)
 
-    full_content = clean_text(raw_content)
+        content = " ".join(body_parts)
+        if len(content) > 50:  # Skip tiny fragments
+            sections.append({"title": title, "content": content})
 
-    # -----------------------------
-    # Find useful CWE content
-    # -----------------------------
+    return sections
 
-    start = full_content.find("Description")
+# ==================================================
+# 4. Parsers for Raw HTML Sources
+# ==================================================
+CWE_SECTIONS = [
+    "Description",
+    "Extended_Description",
+    "Demonstrative_Examples",
+    "Potential_Mitigations",
+]
 
-    end = full_content.find("Content History")
+def parse_cwe_file(file_path: Path) -> list[dict]:
+    """Parses key MITRE CWE sections using target div IDs."""
+    cwe_id = f"{file_path.stem.split('-')[0]}-{file_path.stem.split('-')[1]}"
+    meta = CWE_METADATA.get(cwe_id, {})
 
-    # Some CWE pages may not contain
-    # the exact "Content History" text
-    if end == -1:
-        end = full_content.find("Previous Entry Names")
+    with file_path.open(encoding="utf-8", errors="ignore") as f:
+        soup = BeautifulSoup(f.read(), "html.parser")
 
-    # If Description was found
-    if start != -1:
+    for tag in soup(["script", "style", "nav", "header", "footer", "form"]):
+        tag.decompose()
 
-        # If an ending marker was also found
-        if end != -1 and end > start:
-            content = full_content[start:end]
-
-        # Otherwise keep everything after Description
-        else:
-            content = full_content[start:]
-
-    # Fallback if Description was not found
-    else:
-        content = full_content
-
-    cwe_id = get_cwe_id(file_path)
-
-    metadata = CWE_METADATA.get(cwe_id, {})
-
-    vulnerability_type = metadata.get(
-        "vulnerability_type",
-        "Unknown"
-        )
-
-
-    return {
-        "source": "CWE",
-        "cwe_id": cwe_id,
-        "vulnerability_type": vulnerability_type,
-        "title": title,
-        "content": content
-    }
-
-
-# --------------------------------------------------
-# Chunking
-# --------------------------------------------------
-
-def chunk_text(text, chunk_size=500, overlap=100):
-    words = text.split()
+    doc_title = soup.title.get_text(" ", strip=True) if soup.title else cwe_id
 
     chunks = []
-
-    start = 0
-
-    while start < len(words):
-        end = start + chunk_size
-
-        chunk_words = words[start:end]
-
-        chunk = " ".join(chunk_words)
-
-        chunks.append(chunk)
-
-        start += chunk_size - overlap
-
+    for sec_name in CWE_SECTIONS:
+        # Match any div whose id starts with the section name
+        div = soup.find("div", id=lambda x: x and x.startswith(sec_name))
+        if div:
+            sec_text = clean_text(div.get_text(" ", strip=True))
+            if len(sec_text) > 40:
+                chunks.append({
+                    "id": f"{cwe_id.lower()}-{sec_name.lower()}",
+                    "source": "MITRE CWE",
+                    "document_id": cwe_id,
+                    "cwe_id": cwe_id,
+                    "vulnerability_type": meta.get("vulnerability_type", "Unknown"),
+                    "section_title": sec_name.replace("_", " "),
+                    "pattern_type": classify_pattern(sec_name, sec_text),
+                    "content": f"{clean_text(doc_title)} - {sec_name.replace('_', ' ')}: {sec_text}"
+                })
     return chunks
 
-def create_chunks(document):
-    text_chunks = chunk_text(document["content"])
+def parse_owasp_file(file_path: Path) -> list[dict]:
+    """Parses OWASP Cheat Sheet HTML pages into section chunks."""
+    owasp_id = file_path.stem
+    meta = OWASP_METADATA.get(owasp_id, {})
 
+    with file_path.open(encoding="utf-8", errors="ignore") as f:
+        soup = BeautifulSoup(f.read(), "html.parser")
 
-# --------------------------------------------------
-# Load all CWE documents
-# --------------------------------------------------
+    doc_title = clean_text(soup.title.get_text(strip=True)) if soup.title else owasp_id
+    sections = extract_sections(soup)
 
-cwe_documents = []
+    chunks = []
+    for idx, sec in enumerate(sections):
+        chunks.append({
+            "id": f"{owasp_id.lower()[:20]}-section-{idx}",
+            "source": "OWASP",
+            "document_id": owasp_id,
+            "cwe_id": meta.get("cwe_id"),
+            "vulnerability_type": meta.get("vulnerability_type", "Injection"),
+            "section_title": sec["title"],
+            "pattern_type": classify_pattern(sec["title"], sec["content"]),
+            "content": f"{doc_title} - {sec['title']}: {sec['content']}"
+        })
+    return chunks
 
-for file_path in CWE_DIR.glob("*.html"):
-    document = parse_cwe_file(file_path)
+def parse_bandit_file(file_path: Path) -> list[dict]:
+    """Parses PyCQA Bandit HTML documentation into structured chunks."""
+    rule_id = file_path.stem.split("-")[0].upper()
+    meta = BANDIT_METADATA.get(rule_id, {})
 
-    cwe_documents.append(document)
+    with file_path.open(encoding="utf-8", errors="ignore") as f:
+        soup = BeautifulSoup(f.read(), "html.parser")
 
+    for tag in soup(["script", "style", "nav", "header", "footer"]):
+        tag.decompose()
 
-# --------------------------------------------------
-# Test 
-# --------------------------------------------------
+    full_text = clean_text(soup.get_text(" ", strip=True))
 
-print("Total CWE documents:", len(cwe_documents))
+    return [{
+        "id": f"{rule_id.lower()}-section-0",
+        "source": "PyCQA Bandit",
+        "document_id": rule_id,
+        "cwe_id": meta.get("cwe_id"),
+        "vulnerability_type": meta.get("vulnerability_type", "Python Security"),
+        "section_title": meta.get("title", rule_id),
+        "pattern_type": "remediation",
+        "content": f"{meta.get('title', rule_id)}: {full_text}"
+    }]
 
+# ==================================================
+# 5. Pipeline Execution
+# ==================================================
+def main():
+    all_chunks = []
 
-for document in cwe_documents:
+    # Ingest MITRE CWE files
+    cwe_files = list(CWE_DIR.glob("*.html"))
+    for file_path in cwe_files:
+        all_chunks.extend(parse_cwe_file(file_path))
 
-    chunks = chunk_text(
-        document["content"]
-    )
+    # Ingest OWASP Cheat Sheets
+    owasp_files = list(OWASP_DIR.glob("*.html"))
+    for file_path in owasp_files:
+        all_chunks.extend(parse_owasp_file(file_path))
 
-    print("\n-----------------------------")
+    # Ingest PyCQA Bandit Documentation
+    bandit_files = list(BANDIT_DIR.glob("*.html"))
+    for file_path in bandit_files:
+        all_chunks.extend(parse_bandit_file(file_path))
 
-    print("Title:")
-    print(document["title"])
+    print(f"Total CWE files processed: {len(cwe_files)}")
+    print(f"Total OWASP files processed: {len(owasp_files)}")
+    print(f"Total Bandit files processed: {len(bandit_files)}")
+    print(f"Total structured knowledge chunks created: {len(all_chunks)}")
 
-    print("Content length:")
-    print(len(document["content"]))
+    if all_chunks:
+        print("\n--- Sample Knowledge Chunk Preview ---")
+        print(json.dumps(all_chunks[0], indent=2))
 
-    print("Chunks:")
-    print(len(chunks))
+    # Write output to processed file
+    with PROCESSED_FILE.open("w", encoding="utf-8") as f:
+        json.dump(all_chunks, f, indent=2, ensure_ascii=False)
 
-    print("\nFirst 500 characters:")
-    print(document["content"][:500])
+    print(f"\nSaved structured knowledge base to: {PROCESSED_FILE}")
 
-    print("\nLast 500 characters:")
-    print(document["content"][-500:])
+if __name__ == "__main__":
+    main()
